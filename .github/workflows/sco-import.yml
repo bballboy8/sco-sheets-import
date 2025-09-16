@@ -1,0 +1,22 @@
+name: SCO → Google Sheet (daily)
+
+on:
+  schedule:
+    - cron: "25 10 * * *"  # runs daily @ 10:25 UTC (adjust as you like)
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python -m pip install --upgrade pip
+      - run: pip install -r requirements.txt
+      - name: Run importer
+        env:
+          SHEET_ID: ${{ secrets.SHEET_ID }}
+          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
+        run: python sco_import.py
