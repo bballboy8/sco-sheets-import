@@ -55,10 +55,6 @@ def open_or_create_meta(sh) -> gspread.Worksheet:
         ws = sh.worksheet(META_TAB)
     except gspread.WorksheetNotFound:
         ws = sh.add_worksheet(title=META_TAB, rows=100, cols=6)
-        try:
-            ws.hide()  # hide cosmetic
-        except Exception:
-            pass
         ws.update(values=[["zip_url","entry_index","row_offset","notes","ts"]], range_name="A1")
     return ws
 
