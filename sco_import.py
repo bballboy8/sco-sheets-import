@@ -5,6 +5,10 @@ import requests
 import gspread
 from google.oauth2.service_account import Credentials
 from zipfile import ZipFile
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 # =================== CONFIG ===================
 SHEET_ID = os.environ["SHEET_ID"]
@@ -12,7 +16,7 @@ GOOGLE_CREDENTIALS = os.environ["GOOGLE_CREDENTIALS"]
 
 # QUICK TEST: start with the smallest/first ZIP to verify end-to-end.
 # After it works, set USE_ALL_ZIPS = True
-USE_ALL_ZIPS = False
+USE_ALL_ZIPS = True
 
 ALL_ZIPS = [
     "https://dpupd.sco.ca.gov/01_From_0_To_Below_10.zip",
@@ -24,7 +28,7 @@ SCO_ZIPS = ALL_ZIPS if USE_ALL_ZIPS else ALL_ZIPS[:1]
 
 APPEND_BATCH_SIZE = 1000
 API_PAUSE_SEC = 0.8
-MAX_RECORD_ROWS = 180_000
+MAX_RECORD_ROWS = 500_000
 
 RECORDS_TAB = "Records"
 
@@ -57,8 +61,9 @@ def find_key_col(header: List[str]) -> int:
 
 def load_existing_keys_from_records(ws: gspread.Worksheet, key_col_idx: int) -> set:
     col = key_col_idx + 1
-    vals = ws.col_values(col)[1:]
-    return set((v or "").strip() for v in vals)
+    vals = ws.col_values(col)[1:]  # Skip header
+    # Only include non-empty values
+    return set((v or "").strip() for v in vals if v and str(v).strip())
 
 def append_in_batches(ws: gspread.Worksheet, rows: List[List[str]], width: int):
     if not rows:
@@ -67,7 +72,7 @@ def append_in_batches(ws: gspread.Worksheet, rows: List[List[str]], width: int):
     for r in rows:
         rr = list(r)
         if len(rr) < width:
-            rr.extend([""] * (width - len(rr)])
+            rr.extend([""] * (width - len(rr)))
         elif len(rr) > width:
             rr = rr[:width]
         out.append(rr)
@@ -157,12 +162,14 @@ def main():
     # Load dedupe set lazily (after we know the key column)
     existing_keys: set = set()
 
-    # Current rows (header not counted)
+    # Current rows (header not counted) - only count non-empty rows
     try:
-        rows_so_far = len(ws.col_values(1)) - 1
+        all_values = ws.col_values(1)
+        # Count only non-empty rows (skip header and empty cells)
+        rows_so_far = len([v for v in all_values[1:] if v and str(v).strip()])
     except Exception:
         rows_so_far = 0
-    print(f"[sheet] Records has ~{rows_so_far:,} rows", flush=True)
+    print(f"[sheet] Records has ~{rows_so_far:,} non-empty rows", flush=True)
 
     total_new = 0
 
