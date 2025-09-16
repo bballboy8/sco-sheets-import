@@ -10,8 +10,7 @@ from zipfile import ZipFile  # ZIP64 supported
 SHEET_ID = os.environ["SHEET_ID"]                       # main spreadsheet (has Records + Meta)
 GOOGLE_CREDENTIALS = os.environ["GOOGLE_CREDENTIALS"]   # full JSON as a single string (GitHub secret)
 
-# Optional: sheet that stores ALL seen PROPERTY_IDs (one column, tab name "IDs")
-# Create an empty spreadsheet, add a sheet named "IDs", share with the service account, and set its ID here.
+# Optional global IDs archive (one column tab "IDs"); leave empty to disable
 SEEN_IDS_SHEET_ID = os.environ.get("SEEN_IDS_SHEET_ID", "").strip()
 
 # The 4 segmented archives (avoid All_Records.zip)
@@ -23,8 +22,8 @@ SCO_ZIPS = [
 ]
 
 # Batching / pacing
-APPEND_BATCH_SIZE = 1000       # smaller so you see data sooner
-IDS_APPEND_BATCH  = 20000      # archive IDs in big chunks (cheap write)
+APPEND_BATCH_SIZE = 1000       # smaller so you see rows sooner
+IDS_APPEND_BATCH  = 20000
 API_PAUSE_SEC     = 1.0
 
 # Capacity backstop (rows in Records; header not counted)
@@ -34,7 +33,6 @@ MAX_RECORD_ROWS = 180_000
 RECORDS_TAB = "Records"
 META_TAB    = "Meta"
 IDS_TAB     = "IDs"
-
 
 # =================== GOOGLE AUTH ===================
 def gs_client():
@@ -46,9 +44,9 @@ def gs_client():
     creds = Credentials.from_service_account_info(info, scopes=scopes)
     return gspread.authorize(creds)
 
-
-# =================== SHEET HELPERS ===================
+# =================== SHEET HELPERS (no logging here) ===================
 def open_or_create_meta(sh) -> gspread.Worksheet:
+    """Holds only checkpoints; no logs."""
     try:
         ws = sh.worksheet(META_TAB)
     except gspread.WorksheetNotFound:
@@ -71,33 +69,27 @@ def open_ids_archive(gc) -> Optional[gspread.Worksheet]:
         ws = sh.worksheet(IDS_TAB)
     except gspread.WorksheetNotFound:
         ws = sh.add_worksheet(title=IDS_TAB, rows=1, cols=1)
-        ws.update(values=[[ "PROPERTY_ID" ]], range_name="A1")
+        ws.update(values=[["PROPERTY_ID"]], range_name="A1")
     return ws
 
-def log_meta(meta_ws: gspread.Worksheet, msg: str):
-    ts = time.strftime("%Y-%m-%d %H:%M:%S")
-    meta_ws.append_row([ "", "", "", msg, ts ], value_input_option="RAW")
-
 def read_checkpoint(meta_ws: gspread.Worksheet, zip_url: str) -> Tuple[int,int]:
-    # Returns (entry_index, row_offset); defaults to (0, 0)
+    """Returns (entry_index, row_offset); defaults to (0, 0)."""
     try:
         vals = meta_ws.get_all_values()
     except Exception:
         return (0, 0)
     for r in vals[1:]:
         if r and r[0] == zip_url:
-            ei = int(r[1] or "0")
-            ro = int(r[2] or "0")
-            return (ei, ro)
+            return (int(r[1] or "0"), int(r[2] or "0"))
     return (0, 0)
 
 def write_checkpoint(meta_ws: gspread.Worksheet, zip_url: str, entry_index: int, row_offset: int, note: str=""):
+    """Persist checkpoint atomically; still not 'logging' — just state."""
     vals = meta_ws.get_all_values()
     ts = time.strftime("%Y-%m-%d %H:%M:%S")
     if len(vals) <= 1:
         meta_ws.update(values=[["zip_url","entry_index","row_offset","notes","ts"]], range_name="A1")
         vals = [["zip_url","entry_index","row_offset","notes","ts"]]
-    # find row
     row_idx = None
     for i, r in enumerate(vals[1:], start=2):
         if r and r[0] == zip_url:
@@ -142,9 +134,7 @@ def load_existing_keys_from_archive(ids_ws: Optional[gspread.Worksheet]) -> set:
 def append_ids_to_archive(ids_ws: Optional[gspread.Worksheet], ids_batch: List[str]):
     if not ids_ws or not ids_batch:
         return
-    # unique and non-empty
     uniq = [i for i in dict.fromkeys(i for i in ids_batch if i)]
-    # chunk large inserts
     out = []
     for pid in uniq:
         out.append([pid])
@@ -171,7 +161,6 @@ def append_in_batches(ws: gspread.Worksheet, rows: List[List[str]], width: int):
     if out:
         ws.append_rows(out, value_input_option="RAW")
 
-
 # =================== SCO DOWNLOAD / CSV STREAM ===================
 def download_to_temp(url: str) -> str:
     headers = {
@@ -179,7 +168,7 @@ def download_to_temp(url: str) -> str:
         "Referer": "https://sco.ca.gov/upd_download_property_records.html",
         "Accept": "*/*",
     }
-    print(f"Downloading ZIP: {url}", flush=True)
+    print(f"[download] {url}", flush=True)
     with requests.get(url, headers=headers, stream=True, timeout=180) as r:
         r.raise_for_status()
         fd, path = tempfile.mkstemp(suffix=".zip")
@@ -188,7 +177,7 @@ def download_to_temp(url: str) -> str:
                 if chunk:
                     f.write(chunk)
     size_mb = os.path.getsize(path) / (1024*1024)
-    print(f"Downloaded {url} → {size_mb:.1f} MB", flush=True)
+    print(f"[downloaded] {size_mb:.1f} MB from {url}", flush=True)
     return path
 
 def csv_reader_from_zip(zip_path: str):
@@ -207,18 +196,14 @@ def csv_reader_from_zip(zip_path: str):
                     reader = csv.reader(text)
                     yield name, reader
 
-
 # =================== MAIN ===================
 def main():
+    print("[run] started", flush=True)
     gc = gs_client()
     main_sh = gc.open_by_key(SHEET_ID)
-    meta_ws = open_or_create_meta(main_sh)
+    meta_ws = open_or_create_meta(main_sh)      # checkpoints only
     records_ws = get_or_create_records_ws(main_sh)
-    ids_ws = open_ids_archive(gc)  # may be None
-
-    # Announce run
-    log_meta(meta_ws, "Run started")
-    print("Run started", flush=True)
+    ids_ws = open_ids_archive(gc)               # may be None
 
     # Header state
     existing_header = records_ws.row_values(1)
@@ -226,7 +211,7 @@ def main():
     sheet_width = len(existing_header) if existing_header else None
     key_col_idx: Optional[int] = None
 
-    # De-dupe set: load from IDs archive first (global), add current Records later
+    # De-dupe set: global archive first, then current Records
     existing_keys = set()
     if ids_ws:
         existing_keys |= load_existing_keys_from_archive(ids_ws)
@@ -241,26 +226,17 @@ def main():
     ids_to_archive_batch: List[str] = []
 
     for url in SCO_ZIPS:
-        log_meta(meta_ws, f"Downloading: {url}")
         zpath = download_to_temp(url)
-        # log size to Meta too
-        try:
-            size_mb = os.path.getsize(zpath) / (1024*1024)
-            log_meta(meta_ws, f"Downloaded {size_mb:.1f} MB from {url}")
-        except Exception:
-            pass
-
         entry_start, row_offset = read_checkpoint(meta_ws, url)
-        print(f"Resuming at entry {entry_start}, offset {row_offset}", flush=True)
+        print(f"[resume] {url} @ entry={entry_start}, offset={row_offset}", flush=True)
 
         try:
             entry_idx = -1
             for entry_name, reader in csv_reader_from_zip(zpath):
                 entry_idx += 1
 
-                # Skip entries before checkpoint
                 if entry_idx < entry_start:
-                    _ = next(reader, None)  # consume header to keep reader aligned
+                    _ = next(reader, None)  # consume header to stay aligned
                     continue
 
                 header = next(reader, None)
@@ -268,11 +244,8 @@ def main():
                     continue
 
                 if not header_in_sheet:
-                    # First visible write to the sheet
                     records_ws.update(values=[header], range_name="A1")
-                    log_meta(meta_ws, f"Header written from {entry_name}")
-                    print(f"Header written from {entry_name}", flush=True)
-
+                    print(f"[header] from {entry_name}", flush=True)
                     existing_header = header
                     sheet_width = len(header)
                     key_col_idx = find_key_col(header)
@@ -283,14 +256,14 @@ def main():
                     if key_col_idx is None:
                         key_col_idx = find_key_col(existing_header)
 
-                # If not already loaded, include keys currently in Records
-                if not any(True for _ in existing_keys):  # cheap emptiness check
+                # If we haven't loaded keys from Records yet, do it now
+                if not existing_keys:
                     try:
                         existing_keys |= load_existing_keys_from_records(records_ws, key_col_idx)
                     except Exception:
                         pass
 
-                # Fast-forward within the current entry to the checkpoint offset
+                # Fast-forward within entry to checkpoint offset
                 if entry_idx == entry_start and row_offset > 0:
                     skipped = 0
                     for _ in range(row_offset):
@@ -300,7 +273,7 @@ def main():
                         except StopIteration:
                             break
                     if skipped:
-                        print(f"Skipped {skipped} rows to reach checkpoint", flush=True)
+                        print(f"[skip] advanced {skipped} rows to checkpoint", flush=True)
 
                 batch = []
                 local_offset = row_offset if entry_idx == entry_start else 0
@@ -322,8 +295,7 @@ def main():
                             append_in_batches(records_ws, batch, sheet_width)
                             rows_so_far += len(batch)
                             total_new += len(batch)
-                            log_meta(meta_ws, f"Appended {len(batch)} rows")
-                            print(f"Appended {len(batch)} rows", flush=True)
+                            print(f"[append] {len(batch)} rows (capacity stop flush)", flush=True)
                             for r in batch:
                                 pid = (r[key_col_idx] if key_col_idx < len(r) else "").strip()
                                 if pid:
@@ -333,8 +305,8 @@ def main():
                             ids_to_archive_batch.clear()
 
                         write_checkpoint(meta_ws, url, entry_idx, local_offset, note="capacity stop")
-                        print(f"Capacity stop at ~{rows_so_far} rows. Checkpoint saved ({url} @ entry {entry_idx}, offset {local_offset}).", flush=True)
-                        print(f"Done. New rows added: {total_new}", flush=True)
+                        print(f"[stop] reached ~{rows_so_far} rows; checkpoint saved (entry={entry_idx}, offset={local_offset})", flush=True)
+                        print(f"[done] new rows added: {total_new}", flush=True)
                         return
 
                     # Accept row
@@ -347,18 +319,19 @@ def main():
                         append_in_batches(records_ws, batch, sheet_width)
                         rows_so_far += len(batch)
                         total_new += len(batch)
-                        log_meta(meta_ws, f"Appended {len(batch)} rows")
-                        print(f"Appended {len(batch)} rows", flush=True)
+                        print(f"[append] {len(batch)} rows", flush=True)
                         batch.clear()
                         if len(ids_to_archive_batch) >= IDS_APPEND_BATCH:
                             append_ids_to_archive(ids_ws, ids_to_archive_batch)
                             ids_to_archive_batch.clear()
 
-                # End of entry: persist progress
+                # End of entry: persist progress (reset offset to 0 for next entry)
                 write_checkpoint(meta_ws, url, entry_idx, 0, note=f"entry {entry_idx} complete")
+                print(f"[entry] {entry_idx} complete", flush=True)
 
             # Finished this ZIP
             clear_checkpoint(meta_ws, url)
+            print(f"[zip] complete: {url}", flush=True)
 
         finally:
             try:
@@ -368,8 +341,7 @@ def main():
 
     # Final flush of any pending IDs
     append_ids_to_archive(ids_ws, ids_to_archive_batch)
-    print(f"Done. New rows added: {total_new}", flush=True)
-    log_meta(meta_ws, f"Run finished. New rows: {total_new}")
+    print(f"[done] new rows added: {total_new}", flush=True)
 
 
 if __name__ == "__main__":
