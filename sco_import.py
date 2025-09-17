@@ -1,5 +1,7 @@
 import csv, io, os, json, time, tempfile
 from typing import List, Optional
+from datetime import datetime
+import re
 
 import requests
 import gspread
@@ -26,11 +28,30 @@ ALL_ZIPS = [
 ]
 SCO_ZIPS = ALL_ZIPS if USE_ALL_ZIPS else ALL_ZIPS[:1]
 
-APPEND_BATCH_SIZE = 1000
+APPEND_BATCH_SIZE = 100
 API_PAUSE_SEC = 0.8
 MAX_RECORD_ROWS = 500_000
 
 RECORDS_TAB = "Records"
+
+# Business classification terms
+BUSINESS_TERMS = [
+    "LLC", "INC", "INC.", "CORP", "CORPORATION", "LLP", "LIMITED", "LTD", "COMPANY", "CO ", 
+    "APC", "PC", "PLC", "LP", "L.P.", "DBA", "FIRM", "ASSOCIATES", "HOSPITAL", "ASSOCIATION", 
+    "FOUNDATION", "CHURCH", "UNIVERSITY", "UNIV", "COLLEGE", "SCHOOL", "CHARTER", "MINISTRY", 
+    "UNION", "CLUB", "CENTER", "CENTRE", "TEAM", "WORLD", "INTERNATIONAL", "SERVICES", 
+    "SOLUTIONS", "MANAGEMENT", "CONSULTING", "HOLDINGS", "HOLDING", "PROPERTIES", "PROPERTY", 
+    "VENTURES", "SYSTEMS", "TECHNOLOGIES", "TECH", "REAL ESTATE", "LABS", "LABORATORIES", 
+    "METAL", "SUPPLY", "SUPPLIES", "MANUFACTUR", "MANUFACTURI", "LOGISTICS", "TRANSPORT", 
+    "TRANSPORTAT", "NETWORK", "NETWORKS", "STUDIOS", "PRODUCTIONS", "ENTERTAINME", "BANK", 
+    "CREDIT UNION", "INSURANCE", "MORTGAGE", "FUND", "INVESTMENTS", "INVESTMENT", "CAPITAL", 
+    "ADVISORS", "SECURITIES", "MEDICAL GRO", "HEALTHCARE", "HEALTH CARE", "AUTO", "BODY", 
+    "APPAREL", "PEDIATRICS", "RECOVERY", "FOOD", "FOODS", "SALES", "CONSTRUCTIO", "CARPET", 
+    "TILE", "GLASS", "PERFORMANC", "CAR", "CARS", "BOAT", "BOATS", "ESCROW", "CATERING", 
+    "TRUCKING", "TRUCK", "TRUCKS", "MARKET", "PACKING", "PACKAGING", "OF ", "THE ", "A ", 
+    "COMMUNICAT", "COUNTY", "CITY", "STATE", "TREASURER", "DEPARTMENT", "ELEMENATRY", 
+    "DISTRICT", "GROUP", "SVCS", "&", "AND ", "VOLUNTEER"
+]
 
 # =================== GOOGLE AUTH ===================
 def gs_client():
@@ -64,6 +85,72 @@ def load_existing_keys_from_records(ws: gspread.Worksheet, key_col_idx: int) -> 
     vals = ws.col_values(col)[1:]  # Skip header
     # Only include non-empty values
     return set((v or "").strip() for v in vals if v and str(v).strip())
+
+def is_business(owner_name: str) -> bool:
+    """Determine if owner is a business based on business terms in the name."""
+    if not owner_name or not owner_name.strip():
+        return False
+    
+    owner_upper = owner_name.upper()
+    for term in BUSINESS_TERMS:
+        if term in owner_upper:
+            return True
+    return False
+
+def should_include_record(row: List[str], header: List[str]) -> bool:
+    """Apply filtering rules to determine if record should be included."""
+    try:
+        # Get column indices
+        cash_balance_idx = header.index("CURRENT_CASH_BALANCE") if "CURRENT_CASH_BALANCE" in header else -1
+        owners_idx = header.index("NO_OF_OWNERS") if "NO_OF_OWNERS" in header else -1
+        owner_name_idx = header.index("OWNER_NAME") if "OWNER_NAME" in header else -1
+        owner_street_idx = header.index("OWNER_STREET_1") if "OWNER_STREET_1" in header else -1
+        
+        # Get values
+        cash_balance = float(row[cash_balance_idx]) if cash_balance_idx >= 0 and row[cash_balance_idx] else 0.0
+        num_owners = int(row[owners_idx]) if owners_idx >= 0 and row[owners_idx] else 1
+        owner_name = row[owner_name_idx] if owner_name_idx >= 0 else ""
+        owner_street = row[owner_street_idx] if owner_street_idx >= 0 else ""
+        
+        # Filter 1: Dollar value must be over $6,000
+        if cash_balance <= 6000:
+            return False
+        
+        # Filter 2: Remove claims with 3+ owners and value under $17,999
+        if num_owners >= 3 and cash_balance < 17999:
+            return False
+        
+        # Filter 3: Remove claims with 2 owners and value under $11,999
+        if num_owners == 2 and cash_balance < 11999:
+            return False
+        
+        # Filter 4: Remove records with missing/blank owner information
+        if not owner_name or owner_name.strip().upper() in ["BLANK", "UNKNOWN", ""]:
+            return False
+        
+        # Filter 5: Remove records with missing/blank address information
+        if not owner_street or owner_street.strip().upper() in ["BLANK", "UNKNOWN", ""]:
+            return False
+        
+        return True
+        
+    except (ValueError, IndexError):
+        return False
+
+def add_metadata_columns(row: List[str], header: List[str]) -> List[str]:
+    """Add the required metadata columns to a row."""
+    # Get current date
+    current_date = datetime.now().strftime("%Y-%m-%d")
+    
+    # Determine if business or individual
+    owner_name_idx = header.index("OWNER_NAME") if "OWNER_NAME" in header else -1
+    owner_name = row[owner_name_idx] if owner_name_idx >= 0 else ""
+    record_type = "Business" if is_business(owner_name) else "Individual"
+    
+    # Add new columns: Created By Date, Type, Confidence Level, Stage
+    new_columns = [current_date, record_type, "100%", "Leads"]
+    
+    return row + new_columns
 
 def append_in_batches(ws: gspread.Worksheet, rows: List[List[str]], width: int):
     if not rows:
@@ -183,11 +270,20 @@ def main():
                     continue
 
                 if not header_in_sheet:
+                    # Write original header first
                     ws.update(values=[header], range_name="A1")
                     print(f"[header] written from {entry_name}", flush=True)
-                    existing_header = header
-                    sheet_width = len(header)
-                    key_col_idx = find_key_col(header)
+                    
+                    # Add new columns one by one to avoid cell limit issues
+                    new_columns = ["CREATED_BY_DATE", "TYPE", "CONFIDENCE_LEVEL", "STAGE"]
+                    for i, col_name in enumerate(new_columns):
+                        col_num = len(header) + i + 1
+                        col_letter = gspread.utils.rowcol_to_a1(1, col_num).replace('1', '')
+                        ws.update(values=[[col_name]], range_name=f"{col_letter}1")
+                    
+                    existing_header = header + new_columns
+                    sheet_width = len(existing_header)
+                    key_col_idx = find_key_col(header)  # Use original header for key column
                     header_in_sheet = True
                     # Load keys now that we know which column to read
                     try:
@@ -208,13 +304,23 @@ def main():
                             print(f"[warn] could not load existing keys: {e}", flush=True)
 
                 batch = []
+                filtered_count = 0
                 for row in reader:
                     if not row:
                         continue
+                    
+                    # Apply filtering rules
+                    if not should_include_record(row, header):
+                        filtered_count += 1
+                        continue
+                    
                     key = (row[key_col_idx] if key_col_idx < len(row) else "").strip()
                     key_norm = key or json.dumps(row, ensure_ascii=False)
                     if key_norm in existing_keys:
                         continue
+
+                    # Add metadata columns
+                    extended_row = add_metadata_columns(row, header)
 
                     if rows_so_far + len(batch) + 1 > MAX_RECORD_ROWS:
                         if batch:
@@ -226,7 +332,7 @@ def main():
                         print(f"[done] new rows this run: {total_new:,}", flush=True)
                         return
 
-                    batch.append(row)
+                    batch.append(extended_row)
                     existing_keys.add(key_norm)
 
                     if len(batch) >= APPEND_BATCH_SIZE:
@@ -234,6 +340,9 @@ def main():
                         rows_so_far += len(batch)
                         total_new += len(batch)
                         batch.clear()
+                
+                if filtered_count > 0:
+                    print(f"[filter] excluded {filtered_count:,} records that didn't meet criteria", flush=True)
 
                 if batch:
                     append_in_batches(ws, batch, sheet_width)
