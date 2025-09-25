@@ -49,9 +49,9 @@ BUSINESS_TERMS = [
     "ADVISORS", "SECURITIES", "MEDICAL GRO", "HEALTHCARE", "HEALTH CARE", "AUTO", "BODY", 
     "APPAREL", "PEDIATRICS", "RECOVERY", "FOOD", "FOODS", "SALES", "CONSTRUCTIO", "CARPET", 
     "TILE", "GLASS", "PERFORMANC", "CAR", "CARS", "BOAT", "BOATS", "ESCROW", "CATERING", 
-    "TRUCKING", "TRUCK", "TRUCKS", "MARKET", "PACKING", "PACKAGING", 
+    "TRUCKING", "TRUCK", "TRUCKS", "MARKET", "PACKING", "PACKAGING", "OF ", "THE ", "A ", 
     "COMMUNICAT", "COUNTY", "CITY", "STATE", "TREASURER", "DEPARTMENT", "ELEMENATRY", 
-    "DISTRICT", "GROUP", "SVCS", "VOLUNTEER"
+    "DISTRICT", "GROUP", "SVCS", "&", "AND ", "VOLUNTEER"
 ]
 
 # =================== RETRY LOGIC ===================
@@ -122,9 +122,40 @@ def is_business(owner_name: str) -> bool:
         return False
     
     owner_upper = owner_name.upper()
+    
+    # Terms that require spaces on both sides (common words that need context)
+    space_required_terms = ["OF ", "AND "]
+    # Terms that must be at the beginning
+    beginning_terms = ["A ", "THE "]
+    
     for term in BUSINESS_TERMS:
         if term in owner_upper:
-            return True
+            # For beginning terms, check that they start at position 0
+            if term in beginning_terms:
+                if owner_upper.startswith(term):
+                    return True
+            # For space-required terms, check that they have spaces on both sides
+            elif term in space_required_terms:
+                # Find all occurrences of the term
+                start = 0
+                while True:
+                    pos = owner_upper.find(term, start)
+                    if pos == -1:
+                        break
+                    
+                    # Check if there's a space before (or it's at the beginning)
+                    has_space_before = pos == 0 or owner_upper[pos - 1] == ' '
+                    # Check if there's a space after (or it's at the end)
+                    has_space_after = pos + len(term) >= len(owner_upper) or owner_upper[pos + len(term)] == ' '
+                    
+                    if has_space_before and has_space_after:
+                        return True
+                    
+                    start = pos + 1
+            else:
+                # For other terms, use simple substring matching
+                return True
+    
     return False
 
 def should_include_record(row: List[str], header: List[str]) -> bool:
