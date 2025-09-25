@@ -2,6 +2,7 @@ import csv, io, os, json, time, tempfile
 from typing import List, Optional
 from datetime import datetime
 import re
+import random
 
 import requests
 import gspread
@@ -28,8 +29,8 @@ ALL_ZIPS = [
 ]
 SCO_ZIPS = ALL_ZIPS if USE_ALL_ZIPS else ALL_ZIPS[:1]
 
-APPEND_BATCH_SIZE = 100
-API_PAUSE_SEC = 0.8
+APPEND_BATCH_SIZE = 1000
+API_PAUSE_SEC = 1.5
 MAX_RECORD_ROWS = 500_000
 
 RECORDS_TAB = "Records"
@@ -48,10 +49,39 @@ BUSINESS_TERMS = [
     "ADVISORS", "SECURITIES", "MEDICAL GRO", "HEALTHCARE", "HEALTH CARE", "AUTO", "BODY", 
     "APPAREL", "PEDIATRICS", "RECOVERY", "FOOD", "FOODS", "SALES", "CONSTRUCTIO", "CARPET", 
     "TILE", "GLASS", "PERFORMANC", "CAR", "CARS", "BOAT", "BOATS", "ESCROW", "CATERING", 
-    "TRUCKING", "TRUCK", "TRUCKS", "MARKET", "PACKING", "PACKAGING", "OF ", "THE ", "A ", 
+    "TRUCKING", "TRUCK", "TRUCKS", "MARKET", "PACKING", "PACKAGING", 
     "COMMUNICAT", "COUNTY", "CITY", "STATE", "TREASURER", "DEPARTMENT", "ELEMENATRY", 
-    "DISTRICT", "GROUP", "SVCS", "&", "AND ", "VOLUNTEER"
+    "DISTRICT", "GROUP", "SVCS", "VOLUNTEER"
 ]
+
+# =================== RETRY LOGIC ===================
+def retry_with_backoff(func, max_retries=3, base_delay=1, max_delay=60):
+    """Retry a function with exponential backoff."""
+    for attempt in range(max_retries):
+        try:
+            return func()
+        except Exception as e:
+            if attempt == max_retries - 1:
+                print(f"[error] Final attempt failed: {e}", flush=True)
+                raise
+            
+            # Calculate delay with exponential backoff and jitter
+            delay = min(base_delay * (2 ** attempt) + random.uniform(0, 1), max_delay)
+            print(f"[retry] Attempt {attempt + 1} failed: {e}", flush=True)
+            print(f"[retry] Waiting {delay:.1f}s before retry...", flush=True)
+            time.sleep(delay)
+
+def safe_append_rows(ws, rows, value_input_option="RAW"):
+    """Safely append rows with retry logic."""
+    def _append():
+        return ws.append_rows(rows, value_input_option=value_input_option)
+    return retry_with_backoff(_append)
+
+def safe_update(ws, values, range_name):
+    """Safely update cells with retry logic."""
+    def _update():
+        return ws.update(values=values, range_name=range_name)
+    return retry_with_backoff(_update)
 
 # =================== GOOGLE AUTH ===================
 def gs_client():
@@ -164,59 +194,62 @@ def append_in_batches(ws: gspread.Worksheet, rows: List[List[str]], width: int):
             rr = rr[:width]
         out.append(rr)
         if len(out) >= APPEND_BATCH_SIZE:
-            ws.append_rows(out, value_input_option="RAW")
+            safe_append_rows(ws, out, value_input_option="RAW")
             print(f"[append] {len(out)} rows", flush=True)
             out.clear()
             time.sleep(API_PAUSE_SEC)
     if out:
-        ws.append_rows(out, value_input_option="RAW")
+        safe_append_rows(ws, out, value_input_option="RAW")
         print(f"[append] {len(out)} rows", flush=True)
 
 # =================== SCO DOWNLOAD / CSV STREAM ===================
 def download_to_temp(url: str) -> str:
-    # Try HEAD for size if server provides it
-    size_hint = None
-    try:
-        hr = requests.head(url, timeout=30, allow_redirects=True)
-        if hr.ok:
-            size_hint = int(hr.headers.get("Content-Length") or 0) or None
-    except Exception:
-        pass
+    def _download():
+        # Try HEAD for size if server provides it
+        size_hint = None
+        try:
+            hr = requests.head(url, timeout=30, allow_redirects=True)
+            if hr.ok:
+                size_hint = int(hr.headers.get("Content-Length") or 0) or None
+        except Exception:
+            pass
 
-    headers = {
-        "User-Agent": "Mozilla/5.0",
-        "Referer": "https://sco.ca.gov/upd_download_property_records.html",
-        "Accept": "*/*",
-    }
+        headers = {
+            "User-Agent": "Mozilla/5.0",
+            "Referer": "https://sco.ca.gov/upd_download_property_records.html",
+            "Accept": "*/*",
+        }
 
-    print(f"[download] starting → {url}", flush=True)
-    with requests.get(url, headers=headers, stream=True, timeout=600) as r:
-        r.raise_for_status()
-        fd, path = tempfile.mkstemp(suffix=".zip")
-        total = 0
-        next_marker = 50 * 1024 * 1024  # 50 MB
-        with os.fdopen(fd, "wb") as f:
-            for chunk in r.iter_content(chunk_size=1024 * 1024):
-                if not chunk:
-                    continue
-                f.write(chunk)
-                total += len(chunk)
-                if total >= next_marker:
-                    mb = total / (1024 * 1024)
-                    if size_hint:
-                        pct = 100.0 * total / size_hint
-                        print(f"[download] {mb:.0f} MB ({pct:.1f}%)", flush=True)
-                    else:
-                        print(f"[download] {mb:.0f} MB", flush=True)
-                    next_marker += 50 * 1024 * 1024
+        print(f"[download] starting → {url}", flush=True)
+        with requests.get(url, headers=headers, stream=True, timeout=600) as r:
+            r.raise_for_status()
+            fd, path = tempfile.mkstemp(suffix=".zip")
+            total = 0
+            next_marker = 50 * 1024 * 1024  # 50 MB
+            with os.fdopen(fd, "wb") as f:
+                for chunk in r.iter_content(chunk_size=1024 * 1024):
+                    if not chunk:
+                        continue
+                    f.write(chunk)
+                    total += len(chunk)
+                    if total >= next_marker:
+                        mb = total / (1024 * 1024)
+                        if size_hint:
+                            pct = 100.0 * total / size_hint
+                            print(f"[download] {mb:.0f} MB ({pct:.1f}%)", flush=True)
+                        else:
+                            print(f"[download] {mb:.0f} MB", flush=True)
+                        next_marker += 50 * 1024 * 1024
 
-    size_mb = os.path.getsize(path) / (1024 * 1024)
-    if size_hint:
-        hint_mb = size_hint / (1024 * 1024)
-        print(f"[downloaded] {size_mb:.1f} MB (server hint {hint_mb:.1f} MB)", flush=True)
-    else:
-        print(f"[downloaded] {size_mb:.1f} MB", flush=True)
-    return path
+        size_mb = os.path.getsize(path) / (1024 * 1024)
+        if size_hint:
+            hint_mb = size_hint / (1024 * 1024)
+            print(f"[downloaded] {size_mb:.1f} MB (server hint {hint_mb:.1f} MB)", flush=True)
+        else:
+            print(f"[downloaded] {size_mb:.1f} MB", flush=True)
+        return path
+    
+    return retry_with_backoff(_download, max_retries=3, base_delay=2, max_delay=30)
 
 def csv_reader_from_zip(zip_path: str):
     with ZipFile(zip_path, mode="r", allowZip64=True) as zf:
@@ -271,7 +304,7 @@ def main():
 
                 if not header_in_sheet:
                     # Write original header first
-                    ws.update(values=[header], range_name="A1")
+                    safe_update(ws, [header], "A1")
                     print(f"[header] written from {entry_name}", flush=True)
                     
                     # Add new columns one by one to avoid cell limit issues
@@ -279,7 +312,7 @@ def main():
                     for i, col_name in enumerate(new_columns):
                         col_num = len(header) + i + 1
                         col_letter = gspread.utils.rowcol_to_a1(1, col_num).replace('1', '')
-                        ws.update(values=[[col_name]], range_name=f"{col_letter}1")
+                        safe_update(ws, [[col_name]], f"{col_letter}1")
                     
                     existing_header = header + new_columns
                     sheet_width = len(existing_header)
