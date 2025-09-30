@@ -19,4 +19,5 @@ jobs:
         env:
           SHEET_ID: ${{ secrets.SHEET_ID }}
           GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
+          SEEN_IDS_SHEET_ID: ${{ secrets.SEEN_IDS_SHEET_ID }}
         run: python sco_import.py
