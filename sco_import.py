@@ -101,9 +101,11 @@ def open_seen_ids_ws(gc) -> Optional[gspread.Worksheet]:
     except gspread.WorksheetNotFound:
         ws = sh.add_worksheet(title=SEEN_TAB, rows=1, cols=1)
     # ensure header
-    if ws.get_last_row() == 0:
-        safe_update(ws, [[SEEN_HDR]], "A1")
-    elif (ws.cell(1,1).value or "").strip().upper() != SEEN_HDR:
+    try:
+        first_cell = ws.cell(1,1).value
+        if not first_cell or first_cell.strip().upper() != SEEN_HDR:
+            safe_update(ws, [[SEEN_HDR]], "A1")
+    except Exception:
         safe_update(ws, [[SEEN_HDR]], "A1")
     return ws
 
