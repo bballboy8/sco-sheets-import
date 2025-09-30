@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 # ---------- env ----------
 load_dotenv()
 SHEET_ID              = os.environ["SHEET_ID"]                          # main spreadsheet (Records tab)
-SEEN_IDS_SHEET_ID     = os.environ.get("SEEN_IDS_SHEET_ID", "").strip()  # Seen Property IDs spreadsheet (IDs tab)
+SEEN_IDS_SHEET_ID     = os.environ["SEEN_IDS_SHEET_ID"]         # Seen Property IDs spreadsheet (IDs tab)
 GOOGLE_CREDENTIALS    = os.environ["GOOGLE_CREDENTIALS"]
 
 # ---------- config ----------
