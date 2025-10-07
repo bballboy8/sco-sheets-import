@@ -189,22 +189,46 @@ def add_metadata_columns(row: List[str], header: List[str]) -> List[str]:
     record_type = "Business" if is_business(owner) else "Individual"
     return row + [current_date, record_type, "100%", "Leads"]
 
-def append_in_batches(ws: gspread.Worksheet, rows: List[List[str]], width: int):
+def find_first_empty_row(ws: gspread.Worksheet) -> int:
+    """Find the first row where column A is empty. Returns 1-based row number."""
+    try:
+        col_a_values = ws.col_values(1)  # Get all values from column A
+        # Find first empty or None value
+        for i, value in enumerate(col_a_values):
+            if not value or not str(value).strip():
+                return i + 1  # Return 1-based row number
+        # If all rows have values, return next row
+        return len(col_a_values) + 1
+    except Exception:
+        return 1  # If error, start from row 1
+
+def write_in_batches(ws: gspread.Worksheet, rows: List[List[str]], width: int):
     if not rows: return
     out = []
+    current_start_row = find_first_empty_row(ws)
+    
     for r in rows:
         rr = list(r)
         if len(rr) < width: rr.extend([""] * (width - len(rr)))
         elif len(rr) > width: rr = rr[:width]
         out.append(rr)
+        
         if len(out) >= APPEND_BATCH_SIZE:
-            safe_append_rows(ws, out, value_input_option="RAW")
-            print(f"[append] {len(out)} rows", flush=True)
+            # Write batch starting at current_start_row
+            end_row = current_start_row + len(out) - 1
+            range_name = f"A{current_start_row}:{gspread.utils.rowcol_to_a1(end_row, width).replace(str(end_row), '')}{end_row}"
+            safe_update(ws, out, range_name)
+            print(f"[write] {len(out)} rows at row {current_start_row}", flush=True)
+            current_start_row = end_row + 1
             out.clear()
             time.sleep(API_PAUSE_SEC)
+    
     if out:
-        safe_append_rows(ws, out, value_input_option="RAW")
-        print(f"[append] {len(out)} rows", flush=True)
+        # Write remaining rows
+        end_row = current_start_row + len(out) - 1
+        range_name = f"A{current_start_row}:{gspread.utils.rowcol_to_a1(end_row, width).replace(str(end_row), '')}{end_row}"
+        safe_update(ws, out, range_name)
+        print(f"[write] {len(out)} rows at row {current_start_row}", flush=True)
 
 # ---------- download / unzip ----------
 def download_to_temp(url: str) -> str:
@@ -350,7 +374,7 @@ def main():
                     # capacity guard
                     if rows_so_far + len(batch) + 1 > MAX_RECORD_ROWS:
                         if batch:
-                            append_in_batches(ws, batch, sheet_width)
+                            write_in_batches(ws, batch, sheet_width)
                             cnt = len(batch)
                             rows_so_far += cnt; total_new += cnt; batch.clear()
                         print(f"[stop] capacity at ~{rows_so_far:,} rows", flush=True)
@@ -361,7 +385,7 @@ def main():
                     existing_sheet_pids.add(pid)  # mark as present to avoid intra-run dupes
 
                     if len(batch) >= APPEND_BATCH_SIZE:
-                        append_in_batches(ws, batch, sheet_width)
+                        write_in_batches(ws, batch, sheet_width)
                         cnt = len(batch)
                         rows_so_far += cnt; total_new += cnt; batch.clear()
 
@@ -369,7 +393,7 @@ def main():
                     print(f"[filter] excluded {filtered_count:,} records that didn't meet criteria", flush=True)
 
                 if batch:
-                    append_in_batches(ws, batch, sheet_width)
+                    write_in_batches(ws, batch, sheet_width)
                     cnt = len(batch)
                     rows_so_far += cnt; total_new += cnt; batch.clear()
         finally:
