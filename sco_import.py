@@ -18,10 +18,10 @@ GOOGLE_CREDENTIALS    = os.environ["GOOGLE_CREDENTIALS"]
 # ---------- config ----------
 USE_ALL_ZIPS = True
 ALL_ZIPS = [
-    "https://dpupd.sco.ca.gov/01_From_0_To_Below_10.zip",
-    "https://dpupd.sco.ca.gov/02_From_10_To_Below_100.zip",
-    "https://dpupd.sco.ca.gov/03_From_100_To_Below_500.zip",
     "https://dpupd.sco.ca.gov/04_From_500_To_Beyond.zip",
+    "https://dpupd.sco.ca.gov/03_From_100_To_Below_500.zip", 
+    "https://dpupd.sco.ca.gov/02_From_10_To_Below_100.zip",
+    "https://dpupd.sco.ca.gov/01_From_0_To_Below_10.zip",
 ]
 SCO_ZIPS = ALL_ZIPS if USE_ALL_ZIPS else ALL_ZIPS[:1]
 
@@ -73,6 +73,102 @@ def safe_append_rows(ws, rows, value_input_option="RAW"):
 def safe_update(ws, values, range_name):
     def _update(): return ws.update(values=values, range_name=range_name)
     return retry_with_backoff(_update)
+
+def safe_batch_update(ws, requests):
+    def _batch_update(): return ws.batch_update(requests)
+    return retry_with_backoff(_batch_update)
+
+# ---------- Data validation helpers ----------
+def get_data_validation_from_cell(ws, cell_address):
+    """Get data validation rule from a specific cell (e.g., AE2)."""
+    try:
+        # For now, we'll assume no existing validation and return None
+        # The Google Sheets API doesn't have a direct way to get data validation rules
+        # We'll create a default rule instead
+        return None
+    except Exception as e:
+        print(f"[warn] Could not get data validation from {cell_address}: {e}", flush=True)
+        return None
+
+def apply_data_validation_to_range(ws, start_row, end_row, validation_rule, spreadsheet=None):
+    """Apply data validation rule to a range of cells in column AE."""
+    if not validation_rule:
+        return
+    
+    try:
+        # Create the data validation request using the correct format
+        request = {
+            "requests": [
+                {
+                    "setDataValidation": {
+                        "range": {
+                            "sheetId": ws.id,
+                            "startRowIndex": start_row - 1,  # Convert to 0-based
+                            "endRowIndex": end_row,
+                            "startColumnIndex": 30,  # Column AE (0-based)
+                            "endColumnIndex": 31
+                        },
+                        "rule": validation_rule
+                    }
+                }
+            ]
+        }
+        
+        # Apply the validation rule using the spreadsheet's batch_update method
+        if spreadsheet:
+            spreadsheet.batch_update(request)
+        else:
+            # Try to get the spreadsheet from the worksheet
+            try:
+                spreadsheet = ws.spreadsheet
+                spreadsheet.batch_update(request)
+            except AttributeError:
+                print(f"[warn] Could not access spreadsheet object for data validation", flush=True)
+                return
+        
+        print(f"[validation] Applied data validation to rows {start_row}-{end_row} in column AE", flush=True)
+        
+    except Exception as e:
+        print(f"[warn] Could not apply data validation to rows {start_row}-{end_row}: {e}", flush=True)
+
+def create_default_data_validation_rule():
+    """Create a default dropdown validation rule with YES/NO options."""
+    return {
+        "condition": {
+            "type": "ONE_OF_LIST",
+            "values": [
+                {"userEnteredValue": "YES"},
+                {"userEnteredValue": "NO"}
+            ]
+        },
+        "showCustomUi": True,
+        "strict": True
+    }
+
+def ensure_ae2_has_validation(ws, spreadsheet=None):
+    """Ensure AE2 has data validation rule, create one if it doesn't exist."""
+    validation_rule = get_data_validation_from_cell(ws, "AE2")
+    
+    if not validation_rule:
+        print("[validation] Creating default YES/NO dropdown validation in AE2", flush=True)
+        default_rule = create_default_data_validation_rule()
+        apply_data_validation_to_range(ws, 2, 2, default_rule, spreadsheet)  # Apply to AE2 only
+        return default_rule
+    else:
+        print("[validation] Found existing data validation rule in AE2", flush=True)
+        return validation_rule
+
+def copy_data_validation_to_new_rows(ws, start_row, num_rows, spreadsheet=None):
+    """Copy data validation from AE2 to new rows starting at start_row."""
+    # Ensure AE2 has validation rule
+    validation_rule = ensure_ae2_has_validation(ws, spreadsheet)
+    
+    if validation_rule:
+        # Apply the validation rule to the new rows
+        end_row = start_row + num_rows - 1
+        apply_data_validation_to_range(ws, start_row, end_row, validation_rule, spreadsheet)
+    else:
+        print(f"[warn] Could not create or find data validation rule for AE2", flush=True)
 
 # ---------- Google auth ----------
 def gs_client():
@@ -187,38 +283,53 @@ def add_metadata_columns(row: List[str], header: List[str]) -> List[str]:
     name_idx = header.index("OWNER_NAME") if "OWNER_NAME" in header else -1
     owner = row[name_idx] if name_idx >= 0 else ""
     record_type = "Business" if is_business(owner) else "Individual"
-    return row + [current_date, record_type, "100%", "Leads"]
+    
+    # Build metadata columns - always add all 4 columns since EXPORT_TO_CRM is now in AE
+    metadata_cols = [current_date, record_type, "100%", "Leads"]
+    
+    return row + metadata_cols
 
 def find_first_empty_row(ws: gspread.Worksheet) -> int:
-    """Find the first row where column A is empty. Returns 1-based row number."""
+    """Find the first empty row after the header row (row 1). Returns 1-based row number."""
     try:
         col_a_values = ws.col_values(1)  # Get all values from column A
-        # Find first empty or None value
-        for i, value in enumerate(col_a_values):
+        # Start from row 2 (index 1) since row 1 is always headers
+        for i in range(1, len(col_a_values)):
+            value = col_a_values[i]
             if not value or not str(value).strip():
                 return i + 1  # Return 1-based row number
-        # If all rows have values, return next row
+        # If all rows after header have values, return next row
         return len(col_a_values) + 1
     except Exception:
-        return 1  # If error, start from row 1
+        return 2  # If error, start from row 2 (after header)
 
-def write_in_batches(ws: gspread.Worksheet, rows: List[List[str]], width: int):
+def write_in_batches(ws: gspread.Worksheet, rows: List[List[str]], data_width: int):
     if not rows: return
     out = []
     current_start_row = find_first_empty_row(ws)
     
+    # Force writing only to columns A-AD (30 columns) to preserve AE
+    max_cols = 30
+    
     for r in rows:
         rr = list(r)
-        if len(rr) < width: rr.extend([""] * (width - len(rr)))
-        elif len(rr) > width: rr = rr[:width]
+        # Only pad to max_cols, don't extend beyond AD
+        if len(rr) < max_cols: 
+            rr.extend([""] * (max_cols - len(rr)))
+        elif len(rr) > max_cols: 
+            rr = rr[:max_cols]
         out.append(rr)
         
         if len(out) >= APPEND_BATCH_SIZE:
-            # Write batch starting at current_start_row
+            # Write batch starting at current_start_row, only to column AD
             end_row = current_start_row + len(out) - 1
-            range_name = f"A{current_start_row}:{gspread.utils.rowcol_to_a1(end_row, width).replace(str(end_row), '')}{end_row}"
+            range_name = f"A{current_start_row}:AD{end_row}"
             safe_update(ws, out, range_name)
-            print(f"[write] {len(out)} rows at row {current_start_row}", flush=True)
+            print(f"[write] {len(out)} rows at row {current_start_row} (columns A-AD)", flush=True)
+            
+            # Copy data validation from AE2 to the new rows
+            copy_data_validation_to_new_rows(ws, current_start_row, len(out), ws.spreadsheet)
+            
             current_start_row = end_row + 1
             out.clear()
             time.sleep(API_PAUSE_SEC)
@@ -226,9 +337,12 @@ def write_in_batches(ws: gspread.Worksheet, rows: List[List[str]], width: int):
     if out:
         # Write remaining rows
         end_row = current_start_row + len(out) - 1
-        range_name = f"A{current_start_row}:{gspread.utils.rowcol_to_a1(end_row, width).replace(str(end_row), '')}{end_row}"
+        range_name = f"A{current_start_row}:AD{end_row}"
         safe_update(ws, out, range_name)
-        print(f"[write] {len(out)} rows at row {current_start_row}", flush=True)
+        print(f"[write] {len(out)} rows at row {current_start_row} (columns A-AD)", flush=True)
+        
+        # Copy data validation from AE2 to the new rows
+        copy_data_validation_to_new_rows(ws, current_start_row, len(out), ws.spreadsheet)
 
 # ---------- download / unzip ----------
 def download_to_temp(url: str) -> str:
@@ -294,6 +408,9 @@ def main():
     # open main sheet
     sh = gc.open_by_key(SHEET_ID)
     ws = get_or_create_records_ws(sh)
+    
+    # Ensure AE2 has data validation rule for future copying
+    ensure_ae2_has_validation(ws, sh)
 
     # dedupe sets
     existing_header = ws.row_values(1)
@@ -326,14 +443,18 @@ def main():
                 if header is None: continue
 
                 if not header_in_sheet:
-                    # Write original header and our extra columns
+                    # Always write headers since row 1 is always reserved for headers
+                    print(f"[header] Writing headers", flush=True)
                     safe_update(ws, [header], "A1")
                     new_cols = ["CREATED_BY_DATE", "TYPE", "CONFIDENCE_LEVEL", "STAGE"]
+                    
                     for i, name in enumerate(new_cols, start=1):
                         col_letter = gspread.utils.rowcol_to_a1(1, len(header)+i).rstrip("1")
                         safe_update(ws, [[name]], f"{col_letter}1")
                     existing_header = header + new_cols
-                    sheet_width = len(existing_header)
+                    
+                    # Limit sheet_width to AD (30 columns) to preserve AE for EXPORT_TO_CRM
+                    sheet_width = min(len(existing_header), 30)  # Only write to columns A-AD
                     key_col_idx = find_key_col(header)
                     header_in_sheet = True
                     try:
@@ -342,7 +463,7 @@ def main():
                     except Exception as e:
                         print(f"[warn] could not load Records IDs: {e}", flush=True)
                 else:
-                    if sheet_width is None: sheet_width = len(existing_header)
+                    if sheet_width is None: sheet_width = min(len(existing_header), 30)  # Limit to A-AD
                     if key_col_idx is None: key_col_idx = find_key_col(existing_header)
                     if not existing_sheet_pids:
                         try:
