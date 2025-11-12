@@ -1,4 +1,4 @@
-import csv, io, os, json, time, tempfile
+import csv, io, os, json, time, tempfile, re
 from typing import List, Optional
 from datetime import datetime
 import random
@@ -235,26 +235,41 @@ def load_existing_keys_from_records(ws: gspread.Worksheet, key_col_idx: int) -> 
     return set((v or "").strip() for v in vals if v and str(v).strip())
 
 # ---------- rules ----------
+def _matches_with_boundaries(text: str, term: str) -> bool:
+    """
+    Check if a term appears as a whole word in the text.
+    A whole word means the term is surrounded by word boundaries (non-alphanumeric characters
+    or start/end of string).
+    
+    For terms ending with a space (like "A ", "THE "), the trailing space serves as the
+    word boundary, so we don't require an additional non-alphanumeric character after it.
+    """
+    if not term or not text:
+        return False
+    
+    # Escape special regex characters in the term
+    escaped_term = re.escape(term)
+    
+    # Check if term ends with a space - if so, the space itself is the boundary
+    if term.endswith(' '):
+        # For terms ending with space, only check that it's not preceded by alphanumeric
+        # The trailing space ensures it's followed by a word boundary
+        pattern = r'(?<![A-Za-z0-9])' + escaped_term
+    else:
+        # For other terms, require word boundaries on both sides
+        pattern = r'(?<![A-Za-z0-9])' + escaped_term + r'(?![A-Za-z0-9])'
+    
+    return bool(re.search(pattern, text))
+
 def is_business(owner_name: str) -> bool:
     if not owner_name or not owner_name.strip():
         return False
     name = owner_name.upper()
-    space_required_terms = {"OF ", "AND "}
-    beginning_terms = {"A ", "THE "}
+    
     for term in BUSINESS_TERMS:
-        if term in beginning_terms:
-            if name.startswith(term): return True
-        elif term in space_required_terms:
-            start = 0
-            while True:
-                pos = name.find(term, start)
-                if pos == -1: break
-                before_ok = (pos == 0) or (name[pos-1] == " ")
-                after_ok  = (pos + len(term) >= len(name)) or (name[pos+len(term)] == " ")
-                if before_ok and after_ok: return True
-                start = pos + 1
-        else:
-            if term in name: return True
+        # Use whole word matching for all terms
+        if _matches_with_boundaries(name, term):
+            return True
     return False
 
 def should_include_record(row: List[str], header: List[str]) -> bool:
