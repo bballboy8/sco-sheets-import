@@ -147,28 +147,36 @@ def create_default_data_validation_rule():
 
 def ensure_ae2_has_validation(ws, spreadsheet=None):
     """Ensure AE2 has data validation rule, create one if it doesn't exist."""
-    validation_rule = get_data_validation_from_cell(ws, "AE2")
-    
-    if not validation_rule:
-        print("[validation] Creating default YES/NO dropdown validation in AE2", flush=True)
-        default_rule = create_default_data_validation_rule()
-        apply_data_validation_to_range(ws, 2, 2, default_rule, spreadsheet)  # Apply to AE2 only
-        return default_rule
-    else:
-        print("[validation] Found existing data validation rule in AE2", flush=True)
-        return validation_rule
+    try:
+        validation_rule = get_data_validation_from_cell(ws, "AE2")
+        
+        if not validation_rule:
+            print("[validation] Creating default YES/NO dropdown validation in AE2", flush=True)
+            default_rule = create_default_data_validation_rule()
+            apply_data_validation_to_range(ws, 2, 2, default_rule, spreadsheet)  # Apply to AE2 only
+            return default_rule
+        else:
+            print("[validation] Found existing data validation rule in AE2", flush=True)
+            return validation_rule
+    except Exception as e:
+        print(f"[warn] Could not ensure AE2 has validation: {e}", flush=True)
+        return None
 
 def copy_data_validation_to_new_rows(ws, start_row, num_rows, spreadsheet=None):
     """Copy data validation from AE2 to new rows starting at start_row."""
-    # Ensure AE2 has validation rule
-    validation_rule = ensure_ae2_has_validation(ws, spreadsheet)
-    
-    if validation_rule:
-        # Apply the validation rule to the new rows
-        end_row = start_row + num_rows - 1
-        apply_data_validation_to_range(ws, start_row, end_row, validation_rule, spreadsheet)
-    else:
-        print(f"[warn] Could not create or find data validation rule for AE2", flush=True)
+    try:
+        # Ensure AE2 has validation rule
+        validation_rule = ensure_ae2_has_validation(ws, spreadsheet)
+        
+        if validation_rule:
+            # Apply the validation rule to the new rows
+            end_row = start_row + num_rows - 1
+            apply_data_validation_to_range(ws, start_row, end_row, validation_rule, spreadsheet)
+        else:
+            print(f"[warn] Could not create or find data validation rule for AE2", flush=True)
+    except Exception as e:
+        print(f"[warn] Could not copy data validation to new rows {start_row}-{start_row + num_rows - 1}: {e}", flush=True)
+        # Don't raise - allow the main process to continue even if validation fails
 
 # ---------- Google auth ----------
 def gs_client():
@@ -318,7 +326,7 @@ def find_first_empty_row(ws: gspread.Worksheet) -> int:
     except Exception:
         return 2  # If error, start from row 2 (after header)
 
-def write_in_batches(ws: gspread.Worksheet, rows: List[List[str]], data_width: int):
+def write_in_batches(ws: gspread.Worksheet, rows: List[List[str]], data_width: int, spreadsheet=None):
     if not rows: return
     out = []
     current_start_row = find_first_empty_row(ws)
@@ -343,7 +351,7 @@ def write_in_batches(ws: gspread.Worksheet, rows: List[List[str]], data_width: i
             print(f"[write] {len(out)} rows at row {current_start_row} (columns A-AD)", flush=True)
             
             # Copy data validation from AE2 to the new rows
-            copy_data_validation_to_new_rows(ws, current_start_row, len(out), ws.spreadsheet)
+            copy_data_validation_to_new_rows(ws, current_start_row, len(out), spreadsheet)
             
             current_start_row = end_row + 1
             out.clear()
@@ -357,7 +365,7 @@ def write_in_batches(ws: gspread.Worksheet, rows: List[List[str]], data_width: i
         print(f"[write] {len(out)} rows at row {current_start_row} (columns A-AD)", flush=True)
         
         # Copy data validation from AE2 to the new rows
-        copy_data_validation_to_new_rows(ws, current_start_row, len(out), ws.spreadsheet)
+        copy_data_validation_to_new_rows(ws, current_start_row, len(out), spreadsheet)
 
 # ---------- download / unzip ----------
 def download_to_temp(url: str) -> str:
@@ -374,7 +382,7 @@ def download_to_temp(url: str) -> str:
             "Referer": "https://sco.ca.gov/upd_download_property_records.html",
             "Accept": "*/*",
         }
-        print(f"[download] starting → {url}", flush=True)
+        print(f"[download] starting -> {url}", flush=True)
         with requests.get(url, headers=headers, stream=True, timeout=600) as r:
             r.raise_for_status()
             fd, path = tempfile.mkstemp(suffix=".zip")
@@ -510,7 +518,7 @@ def main():
                     # capacity guard
                     if rows_so_far + len(batch) + 1 > MAX_RECORD_ROWS:
                         if batch:
-                            write_in_batches(ws, batch, sheet_width)
+                            write_in_batches(ws, batch, sheet_width, sh)
                             cnt = len(batch)
                             rows_so_far += cnt; total_new += cnt; batch.clear()
                         print(f"[stop] capacity at ~{rows_so_far:,} rows", flush=True)
@@ -521,7 +529,7 @@ def main():
                     existing_sheet_pids.add(pid)  # mark as present to avoid intra-run dupes
 
                     if len(batch) >= APPEND_BATCH_SIZE:
-                        write_in_batches(ws, batch, sheet_width)
+                        write_in_batches(ws, batch, sheet_width, sh)
                         cnt = len(batch)
                         rows_so_far += cnt; total_new += cnt; batch.clear()
 
@@ -529,7 +537,7 @@ def main():
                     print(f"[filter] excluded {filtered_count:,} records that didn't meet criteria", flush=True)
 
                 if batch:
-                    write_in_batches(ws, batch, sheet_width)
+                    write_in_batches(ws, batch, sheet_width, sh)
                     cnt = len(batch)
                     rows_so_far += cnt; total_new += cnt; batch.clear()
         finally:
