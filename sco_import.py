@@ -2,6 +2,9 @@ import csv, io, os, json, time, tempfile, re
 from typing import List, Optional
 from datetime import datetime
 import random
+import ssl
+import urllib.request
+import urllib.error
 
 import requests
 import gspread
@@ -18,11 +21,12 @@ GOOGLE_CREDENTIALS    = os.environ["GOOGLE_CREDENTIALS"]
 # ---------- config ----------
 USE_ALL_ZIPS = True
 ALL_ZIPS = [
-    "https://dpupd.sco.ca.gov/04_From_500_To_Beyond.zip",
-    "https://dpupd.sco.ca.gov/03_From_100_To_Below_500.zip", 
-    "https://dpupd.sco.ca.gov/02_From_10_To_Below_100.zip",
-    "https://dpupd.sco.ca.gov/01_From_0_To_Below_10.zip",
+    "https://claimit.ca.gov/upd-property-records/04_From_500_To_Beyond.zip",
+    "https://claimit.ca.gov/upd-property-records/03_From_100_To_Below_500.zip", 
+    "https://claimit.ca.gov/upd-property-records/02_From_10_To_Below_100.zip",
+    "https://claimit.ca.gov/upd-property-records/01_From_0_To_Below_10.zip",
 ]
+# Note: There's also "https://claimit.ca.gov/upd-property-records/00_All_Records.zip" for all records
 SCO_ZIPS = ALL_ZIPS if USE_ALL_ZIPS else ALL_ZIPS[:1]
 
 APPEND_BATCH_SIZE = 1000
@@ -370,20 +374,67 @@ def write_in_batches(ws: gspread.Worksheet, rows: List[List[str]], data_width: i
 # ---------- download / unzip ----------
 def download_to_temp(url: str) -> str:
     def _download():
+        import socket
+        import urllib3
+        
+        # Test connection first
+        try:
+            hostname = url.split("//")[1].split("/")[0]
+            print(f"[network] Testing connection to {hostname}...", flush=True)
+            
+            # Try to resolve DNS
+            try:
+                ip = socket.gethostbyname(hostname)
+                print(f"[network] DNS resolved {hostname} to {ip}", flush=True)
+            except socket.gaierror as e:
+                print(f"[network] DNS resolution failed: {e}", flush=True)
+                raise
+            
+            # Try to connect
+            try:
+                sock = socket.create_connection((hostname, 443), timeout=10)
+                sock.close()
+                print(f"[network] TCP connection test successful", flush=True)
+            except (socket.timeout, ConnectionRefusedError) as e:
+                print(f"[network] TCP connection failed: {e}", flush=True)
+                print(f"[network] Note: The server may be blocking connections or down", flush=True)
+        except Exception as e:
+            print(f"[network] Connection test error: {e}", flush=True)
+        
         size_hint = None
         try:
-            hr = requests.head(url, timeout=30, allow_redirects=True)
-            if hr.ok: size_hint = int(hr.headers.get("Content-Length") or 0) or None
-        except Exception:
-            pass
+            # Try HEAD request with SSL verification disabled
+            session = requests.Session()
+            session.verify = False
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+            
+            hr = session.head(url, timeout=30, allow_redirects=True)
+            if hr.ok: 
+                size_hint = int(hr.headers.get("Content-Length") or 0) or None
+                print(f"[network] HEAD request successful, size hint: {size_hint/1024/1024:.1f} MB" if size_hint else "[network] HEAD request successful", flush=True)
+        except Exception as e:
+            print(f"[network] HEAD request failed: {e}", flush=True)
 
         headers = {
-            "User-Agent": "Mozilla/5.0",
-            "Referer": "https://sco.ca.gov/upd_download_property_records.html",
-            "Accept": "*/*",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Referer": "https://claimit.ca.gov/",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.5",
+            "Accept-Encoding": "gzip, deflate, br",
+            "DNT": "1",
+            "Connection": "keep-alive",
+            "Upgrade-Insecure-Requests": "1",
         }
+        
         print(f"[download] starting -> {url}", flush=True)
-        with requests.get(url, headers=headers, stream=True, timeout=600) as r:
+        print(f"[download] Using SSL verification: False (bypassing certificate check)", flush=True)
+        
+        # Create session with disabled SSL verification
+        session = requests.Session()
+        session.verify = False
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        
+        with session.get(url, headers=headers, stream=True, timeout=600) as r:
             r.raise_for_status()
             fd, path = tempfile.mkstemp(suffix=".zip")
             total = 0
@@ -408,6 +459,49 @@ def download_to_temp(url: str) -> str:
             print(f"[downloaded] {size_mb:.1f} MB", flush=True)
         return path
     return retry_with_backoff(_download, max_retries=3, base_delay=2, max_delay=30)
+
+def download_with_urllib(url: str) -> str:
+    """Fallback download method using urllib if requests fails."""
+    print(f"[fallback] Trying urllib download method for {url}", flush=True)
+    
+    # Create SSL context that doesn't verify certificates
+    ssl_context = ssl.create_default_context()
+    ssl_context.check_hostname = False
+    ssl_context.verify_mode = ssl.CERT_NONE
+    
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Referer": "https://claimit.ca.gov/",
+    }
+    
+    req = urllib.request.Request(url, headers=headers)
+    
+    try:
+        with urllib.request.urlopen(req, context=ssl_context, timeout=600) as response:
+            fd, path = tempfile.mkstemp(suffix=".zip")
+            total = 0
+            next_marker = 50 * 1024 * 1024
+            
+            with os.fdopen(fd, "wb") as f:
+                while True:
+                    chunk = response.read(1024 * 1024)  # 1MB chunks
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    total += len(chunk)
+                    
+                    if total >= next_marker:
+                        mb = total / (1024 * 1024)
+                        print(f"[fallback download] {mb:.0f} MB", flush=True)
+                        next_marker += 50 * 1024 * 1024
+            
+            size_mb = os.path.getsize(path) / (1024 * 1024)
+            print(f"[fallback downloaded] {size_mb:.1f} MB", flush=True)
+            return path
+            
+    except urllib.error.URLError as e:
+        print(f"[fallback] urllib download failed: {e}", flush=True)
+        raise
 
 def csv_reader_from_zip(zip_path: str):
     with ZipFile(zip_path, mode="r", allowZip64=True) as zf:
@@ -459,7 +553,20 @@ def main():
 
     for url in SCO_ZIPS:
         print(f"Processing: {url}", flush=True)
-        zpath = download_to_temp(url)
+        
+        # Try regular download first, then fallback to urllib if it fails
+        try:
+            zpath = download_to_temp(url)
+        except Exception as e:
+            print(f"[error] Regular download failed: {e}", flush=True)
+            print(f"[fallback] Attempting alternative download method...", flush=True)
+            try:
+                zpath = download_with_urllib(url)
+            except Exception as e2:
+                print(f"[error] All download methods failed for {url}", flush=True)
+                print(f"[error] Last error: {e2}", flush=True)
+                print(f"[skip] Skipping this ZIP file and continuing with next one...", flush=True)
+                continue
         try:
             for entry_name, reader in csv_reader_from_zip(zpath):
                 header = next(reader, None)
