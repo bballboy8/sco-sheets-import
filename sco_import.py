@@ -84,7 +84,7 @@ def safe_batch_update(ws, requests):
 
 # ---------- Data validation helpers ----------
 def get_data_validation_from_cell(ws, cell_address):
-    """Get data validation rule from a specific cell (e.g., AE2)."""
+    """Get data validation rule from a specific cell (e.g., AH2)."""
     try:
         # For now, we'll assume no existing validation and return None
         # The Google Sheets API doesn't have a direct way to get data validation rules
@@ -95,7 +95,7 @@ def get_data_validation_from_cell(ws, cell_address):
         return None
 
 def apply_data_validation_to_range(ws, start_row, end_row, validation_rule, spreadsheet=None):
-    """Apply data validation rule to a range of cells in column AE."""
+    """Apply data validation rule to a range of cells in column AH."""
     if not validation_rule:
         return
     
@@ -109,8 +109,8 @@ def apply_data_validation_to_range(ws, start_row, end_row, validation_rule, spre
                             "sheetId": ws.id,
                             "startRowIndex": start_row - 1,  # Convert to 0-based
                             "endRowIndex": end_row,
-                            "startColumnIndex": 30,  # Column AE (0-based)
-                            "endColumnIndex": 31
+                            "startColumnIndex": 33,  # Column AH (0-based)
+                            "endColumnIndex": 34
                         },
                         "rule": validation_rule
                     }
@@ -130,7 +130,7 @@ def apply_data_validation_to_range(ws, start_row, end_row, validation_rule, spre
                 print(f"[warn] Could not access spreadsheet object for data validation", flush=True)
                 return
         
-        print(f"[validation] Applied data validation to rows {start_row}-{end_row} in column AE", flush=True)
+        print(f"[validation] Applied data validation to rows {start_row}-{end_row} in column AH", flush=True)
         
     except Exception as e:
         print(f"[warn] Could not apply data validation to rows {start_row}-{end_row}: {e}", flush=True)
@@ -149,37 +149,122 @@ def create_default_data_validation_rule():
         "strict": True
     }
 
-def ensure_ae2_has_validation(ws, spreadsheet=None):
-    """Ensure AE2 has data validation rule, create one if it doesn't exist."""
+def ensure_ah2_has_validation(ws, spreadsheet=None):
+    """Ensure AH2 has data validation rule, create one if it doesn't exist."""
     try:
-        validation_rule = get_data_validation_from_cell(ws, "AE2")
+        validation_rule = get_data_validation_from_cell(ws, "AH2")
         
         if not validation_rule:
-            print("[validation] Creating default YES/NO dropdown validation in AE2", flush=True)
+            print("[validation] Creating default YES/NO dropdown validation in AH2", flush=True)
             default_rule = create_default_data_validation_rule()
-            apply_data_validation_to_range(ws, 2, 2, default_rule, spreadsheet)  # Apply to AE2 only
+            apply_data_validation_to_range(ws, 2, 2, default_rule, spreadsheet)  # Apply to AH2 only
             return default_rule
         else:
-            print("[validation] Found existing data validation rule in AE2", flush=True)
+            print("[validation] Found existing data validation rule in AH2", flush=True)
             return validation_rule
     except Exception as e:
-        print(f"[warn] Could not ensure AE2 has validation: {e}", flush=True)
+        print(f"[warn] Could not ensure AH2 has validation: {e}", flush=True)
         return None
 
 def copy_data_validation_to_new_rows(ws, start_row, num_rows, spreadsheet=None):
-    """Copy data validation from AE2 to new rows starting at start_row."""
+    """Copy data validation from AH2 to new rows starting at start_row."""
     try:
-        # Ensure AE2 has validation rule
-        validation_rule = ensure_ae2_has_validation(ws, spreadsheet)
+        # Ensure AH2 has validation rule
+        validation_rule = ensure_ah2_has_validation(ws, spreadsheet)
         
         if validation_rule:
             # Apply the validation rule to the new rows
             end_row = start_row + num_rows - 1
             apply_data_validation_to_range(ws, start_row, end_row, validation_rule, spreadsheet)
         else:
-            print(f"[warn] Could not create or find data validation rule for AE2", flush=True)
+            print(f"[warn] Could not create or find data validation rule for AH2", flush=True)
     except Exception as e:
         print(f"[warn] Could not copy data validation to new rows {start_row}-{start_row + num_rows - 1}: {e}", flush=True)
+        # Don't raise - allow the main process to continue even if validation fails
+
+def apply_validation_to_all_rows_in_ah(ws, spreadsheet=None):
+    """Apply data validation to all rows in column AH from row 2 to the bottom of the sheet."""
+    try:
+        # Ensure AH2 has validation rule
+        validation_rule = ensure_ah2_has_validation(ws, spreadsheet)
+        
+        if not validation_rule:
+            print(f"[warn] Could not get validation rule for AH2", flush=True)
+            return
+        
+        # Find the last row - try multiple methods
+        last_row = None
+        
+        # Method 1: Try to get row count from worksheet properties
+        try:
+            # Get worksheet metadata which includes gridProperties
+            sheet_metadata = ws.spreadsheet.get_worksheet_by_id(ws.id)
+            if hasattr(sheet_metadata, 'row_count'):
+                last_row = sheet_metadata.row_count
+        except Exception:
+            pass
+        
+        # Method 2: Try ws.row_count property (if available)
+        if last_row is None:
+            try:
+                if hasattr(ws, 'row_count'):
+                    last_row = ws.row_count
+            except Exception:
+                pass
+        
+        # Method 3: Get all values from column A and find last non-empty row
+        if last_row is None:
+            try:
+                col_a_values = ws.col_values(1)  # Get all values from column A
+                if col_a_values:
+                    # Find the last non-empty row
+                    for i in range(len(col_a_values) - 1, -1, -1):
+                        if col_a_values[i] and str(col_a_values[i]).strip():
+                            last_row = i + 1  # Convert to 1-based
+                            break
+                    # If no non-empty rows found, use length
+                    if last_row is None:
+                        last_row = len(col_a_values)
+            except Exception:
+                pass
+        
+        # Method 4: Use get_all_values() to get all rows (more reliable than col_values)
+        if last_row is None:
+            try:
+                all_values = ws.get_all_values()
+                if all_values:
+                    # Find last non-empty row (checking column A)
+                    for i in range(len(all_values) - 1, -1, -1):
+                        if i < len(all_values) and all_values[i] and len(all_values[i]) > 0:
+                            if all_values[i][0] and str(all_values[i][0]).strip():
+                                last_row = i + 1  # Convert to 1-based (row 1 is header)
+                                break
+                    if last_row is None:
+                        # If no non-empty rows, use the total number of rows
+                        last_row = len(all_values)
+            except Exception as e:
+                print(f"[warn] get_all_values() failed: {e}", flush=True)
+                pass
+        
+        # Method 5: Use MAX_RECORD_ROWS as fallback (we know max capacity)
+        if last_row is None:
+            print(f"[warn] Could not determine last row, using MAX_RECORD_ROWS + 1", flush=True)
+            last_row = MAX_RECORD_ROWS + 1
+        else:
+            # Ensure we don't exceed MAX_RECORD_ROWS
+            last_row = min(last_row, MAX_RECORD_ROWS + 1)
+        
+        # Apply validation from row 2 to last_row
+        if last_row >= 2:
+            print(f"[validation] Applying validation to column AH from row 2 to row {last_row}", flush=True)
+            apply_data_validation_to_range(ws, 2, last_row, validation_rule, spreadsheet)
+            print(f"[validation] Applied validation to column AH from row 2 to row {last_row}", flush=True)
+        else:
+            print(f"[validation] No data rows found, validation only applied to AH2", flush=True)
+    except Exception as e:
+        print(f"[warn] Could not apply validation to all rows in column AH: {e}", flush=True)
+        import traceback
+        print(f"[warn] Traceback: {traceback.format_exc()}", flush=True)
         # Don't raise - allow the main process to continue even if validation fails
 
 # ---------- Google auth ----------
@@ -311,8 +396,51 @@ def add_metadata_columns(row: List[str], header: List[str]) -> List[str]:
     owner = row[name_idx] if name_idx >= 0 else ""
     record_type = "Business" if is_business(owner) else "Individual"
     
-    # Build metadata columns - always add all 4 columns since EXPORT_TO_CRM is now in AE
-    metadata_cols = [current_date, record_type, "100%", "Leads"]
+    # Look for phone and email fields in the source CSV
+    # Try common field name variations
+    mobile_phone = ""
+    other_phone = ""
+    email = ""
+    
+    # Try to find mobile phone field (prioritize mobile-specific fields)
+    mobile_field_names = ["MOBILE_PHONE", "MOBILE", "OWNER_MOBILE_PHONE", "OWNER_MOBILE", "CELL_PHONE", "CELL"]
+    for field_name in mobile_field_names:
+        if field_name in header:
+            idx = header.index(field_name)
+            if idx < len(row) and row[idx]:
+                mobile_phone = str(row[idx]).strip()
+                break
+    
+    # Try to find other phone field (prioritize "OTHER_PHONE", then generic phone fields)
+    other_phone_field_names = ["OTHER_PHONE", "PHONE", "OWNER_PHONE", "HOME_PHONE", "WORK_PHONE", "TELEPHONE"]
+    for field_name in other_phone_field_names:
+        if field_name in header:
+            idx = header.index(field_name)
+            if idx < len(row) and row[idx]:
+                phone_value = str(row[idx]).strip()
+                # If this is "OTHER_PHONE", always use it
+                if field_name == "OTHER_PHONE":
+                    other_phone = phone_value
+                    break
+                # For generic "PHONE" fields, only use if mobile_phone wasn't found from a mobile-specific field
+                # and we haven't set other_phone yet
+                elif not mobile_phone and not other_phone:
+                    # Check if this field was already used for mobile_phone
+                    if field_name not in mobile_field_names:
+                        other_phone = phone_value
+                        break
+    
+    # Try to find email field
+    email_field_names = ["EMAIL", "OWNER_EMAIL", "EMAIL_ADDRESS", "E_MAIL", "E-MAIL"]
+    for field_name in email_field_names:
+        if field_name in header:
+            idx = header.index(field_name)
+            if idx < len(row) and row[idx]:
+                email = str(row[idx]).strip()
+                break
+    
+    # Build metadata columns - always add all 7 columns since EXPORT_TO_CRM is now in AH
+    metadata_cols = [current_date, record_type, "100%", "Leads", mobile_phone, other_phone, email]
     
     return row + metadata_cols
 
@@ -335,12 +463,13 @@ def write_in_batches(ws: gspread.Worksheet, rows: List[List[str]], data_width: i
     out = []
     current_start_row = find_first_empty_row(ws)
     
-    # Force writing only to columns A-AD (30 columns) to preserve AE
-    max_cols = 30
+    # Force writing only to columns A-AG (33 columns) to include new metadata columns
+    # Note: EXPORT_TO_CRM validation is in column AH (34), which is outside this range
+    max_cols = 33
     
     for r in rows:
         rr = list(r)
-        # Only pad to max_cols, don't extend beyond AD
+        # Only pad to max_cols, don't extend beyond AG
         if len(rr) < max_cols: 
             rr.extend([""] * (max_cols - len(rr)))
         elif len(rr) > max_cols: 
@@ -348,13 +477,13 @@ def write_in_batches(ws: gspread.Worksheet, rows: List[List[str]], data_width: i
         out.append(rr)
         
         if len(out) >= APPEND_BATCH_SIZE:
-            # Write batch starting at current_start_row, only to column AD
+            # Write batch starting at current_start_row, up to column AG
             end_row = current_start_row + len(out) - 1
-            range_name = f"A{current_start_row}:AD{end_row}"
+            range_name = f"A{current_start_row}:AG{end_row}"
             safe_update(ws, out, range_name)
-            print(f"[write] {len(out)} rows at row {current_start_row} (columns A-AD)", flush=True)
+            print(f"[write] {len(out)} rows at row {current_start_row} (columns A-AG)", flush=True)
             
-            # Copy data validation from AE2 to the new rows
+            # Copy data validation from AH2 to the new rows
             copy_data_validation_to_new_rows(ws, current_start_row, len(out), spreadsheet)
             
             current_start_row = end_row + 1
@@ -364,11 +493,11 @@ def write_in_batches(ws: gspread.Worksheet, rows: List[List[str]], data_width: i
     if out:
         # Write remaining rows
         end_row = current_start_row + len(out) - 1
-        range_name = f"A{current_start_row}:AD{end_row}"
+        range_name = f"A{current_start_row}:AG{end_row}"
         safe_update(ws, out, range_name)
-        print(f"[write] {len(out)} rows at row {current_start_row} (columns A-AD)", flush=True)
+        print(f"[write] {len(out)} rows at row {current_start_row} (columns A-AG)", flush=True)
         
-        # Copy data validation from AE2 to the new rows
+        # Copy data validation from AH2 to the new rows
         copy_data_validation_to_new_rows(ws, current_start_row, len(out), spreadsheet)
 
 # ---------- download / unzip ----------
@@ -526,8 +655,9 @@ def main():
     sh = gc.open_by_key(SHEET_ID)
     ws = get_or_create_records_ws(sh)
     
-    # Ensure AE2 has data validation rule for future copying
-    ensure_ae2_has_validation(ws, sh)
+    # Ensure AH2 has data validation rule and apply it to all rows
+    ensure_ah2_has_validation(ws, sh)
+    apply_validation_to_all_rows_in_ah(ws, sh)
 
     # dedupe sets
     existing_header = ws.row_values(1)
@@ -571,20 +701,24 @@ def main():
             for entry_name, reader in csv_reader_from_zip(zpath):
                 header = next(reader, None)
                 if header is None: continue
+                
+                # Print header fields for analysis (only once per CSV file)
+                print(f"[header] CSV file '{entry_name}' has {len(header)} columns:", flush=True)
+                print(f"[header] Columns: {', '.join(header)}", flush=True)
 
                 if not header_in_sheet:
                     # Always write headers since row 1 is always reserved for headers
                     print(f"[header] Writing headers", flush=True)
                     safe_update(ws, [header], "A1")
-                    new_cols = ["CREATED_BY_DATE", "TYPE", "CONFIDENCE_LEVEL", "STAGE"]
+                    new_cols = ["CREATED_BY_DATE", "TYPE", "CONFIDENCE_LEVEL", "STAGE", "MOBILE PHONE", "OTHER PHONE", "EMAIL"]
                     
                     for i, name in enumerate(new_cols, start=1):
                         col_letter = gspread.utils.rowcol_to_a1(1, len(header)+i).rstrip("1")
                         safe_update(ws, [[name]], f"{col_letter}1")
                     existing_header = header + new_cols
                     
-                    # Limit sheet_width to AD (30 columns) to preserve AE for EXPORT_TO_CRM
-                    sheet_width = min(len(existing_header), 30)  # Only write to columns A-AD
+                    # Limit sheet_width to AG (33 columns) to include new metadata columns
+                    sheet_width = min(len(existing_header), 33)  # Write to columns A-AG
                     key_col_idx = find_key_col(header)
                     header_in_sheet = True
                     try:
@@ -593,7 +727,7 @@ def main():
                     except Exception as e:
                         print(f"[warn] could not load Records IDs: {e}", flush=True)
                 else:
-                    if sheet_width is None: sheet_width = min(len(existing_header), 30)  # Limit to A-AD
+                    if sheet_width is None: sheet_width = min(len(existing_header), 33)  # Limit to A-AG
                     if key_col_idx is None: key_col_idx = find_key_col(existing_header)
                     if not existing_sheet_pids:
                         try:

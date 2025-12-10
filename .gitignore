@@ -1,3 +1,5 @@
 .venv
 .env
 __pycache__
+raw_sample_data.csv
+sample_output.csv
